@@ -7,7 +7,8 @@ from typing import Any
 from PIL import Image
 from ultralytics import YOLO
 
-MODEL_PATH = "yolo11n.pt"
+# MODEL_PATH = "yolo.pt"
+MODEL_PATH = "../detectionservice/yolo.pt"
 CONFIDENCE_THRESHOLD = 0.25
 IOU_THRESHOLD = 0.45
 
