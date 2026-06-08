@@ -1,0 +1,14 @@
+=====================================================================
+docker compose down
+
+docker compose build --no-cache
+
+docker compose up -d
+=====================================================================
+
+docker compose up -d --build
+
+
+
+--command to randomly split yolo training images
+python -c "from pathlib import Path; import random, shutil; imgs=[f for f in Path('dataset/images').iterdir() if f.is_file()]; random.shuffle(imgs); split=int(len(imgs)*0.8); Path('dataset/images/train').mkdir(parents=True, exist_ok=True); Path('dataset/images/val').mkdir(parents=True, exist_ok=True); [shutil.move(str(f), f'dataset/images/train/{f.name}') for f in imgs[:split]]; [shutil.move(str(f), f'dataset/images/val/{f.name}') for f in imgs[split:]]; print(f'Train={split}, Val={len(imgs)-split}')"
