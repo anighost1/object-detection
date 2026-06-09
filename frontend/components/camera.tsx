@@ -216,21 +216,19 @@ export default function Camera() {
     async function startCamera() {
         try {
             const stream =
-                await navigator.mediaDevices.getUserMedia(
-                    {
-                        video: {
-                            width: 640,
-                            height: 480
-                        },
-                        audio: false
-                    }
-                );
+                await navigator.mediaDevices.getUserMedia({
+                    video: {
+                        width: 640,
+                        height: 480
+                    },
+                    audio: false
+                });
 
             if (videoRef.current) {
                 videoRef.current.srcObject =
                     stream;
             }
-        } catch (err) {
+        } catch (err: any) {
             console.error(err);
         }
     }
@@ -241,6 +239,7 @@ export default function Camera() {
 
     useEffect(() => {
         const socket = io(
+            process.env.NEXT_PUBLIC_YOLO_SERVER_URL ||
             'http://localhost:3000',
             {
                 transports: ['websocket']
