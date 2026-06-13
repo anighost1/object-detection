@@ -4,8 +4,6 @@ import base64
 import io
 from typing import Any
 
-import cv2
-import numpy as np
 from PIL import Image
 from ultralytics import YOLO
 
@@ -29,32 +27,6 @@ print("YOLO model loaded.", file=sys.stderr)
 # ---------------------------------------------------
 
 
-def mask_to_polygon(mask: np.ndarray) -> list[list[float]]:
-    """Convert a binary mask to polygon coordinates."""
-    mask_uint8 = (mask * 255).astype(np.uint8)
-    contours, _ = cv2.findContours(
-        mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-    )
-
-    if not contours:
-        return []
-
-    # Get the largest contour
-    largest_contour = max(contours, key=cv2.contourArea)
-    polygon = largest_contour.squeeze().tolist()
-
-    # Ensure polygon is a list of [x, y] pairs
-    if isinstance(polygon[0], (int, float)):
-        # Single point case
-        polygon = [polygon]
-    elif not isinstance(polygon[0], list):
-        polygon = [[float(p[0]), float(p[1])] for p in polygon]
-    else:
-        polygon = [[float(p[0]), float(p[1])] for p in polygon]
-
-    return polygon
-
-
 def run_model(image: Image.Image) -> list[dict[str, Any]]:
     results = model.predict(
         image,
@@ -67,33 +39,25 @@ def run_model(image: Image.Image) -> list[dict[str, Any]]:
 
     result = results[0]
     names = model.names
-    has_masks = result.masks is not None
 
-    for idx, box in enumerate(result.boxes):
+    for box in result.boxes:
         x1, y1, x2, y2 = box.xyxy[0].tolist()
         class_id = int(box.cls[0])
         confidence = float(box.conf[0])
 
-        detection_dict = {
-            "label": names[class_id],
-            "class_id": class_id,
-            "confidence": round(confidence, 4),
-            "bbox": {
-                "x1": round(float(x1), 2),
-                "y1": round(float(y1), 2),
-                "x2": round(float(x2), 2),
-                "y2": round(float(y2), 2),
-            },
-        }
-
-        # Add segmentation mask if available
-        if has_masks and idx < len(result.masks.data):
-            mask = result.masks.data[idx].cpu().numpy()
-            polygon = mask_to_polygon(mask)
-            if polygon:
-                detection_dict["segments"] = polygon
-
-        detections.append(detection_dict)
+        detections.append(
+            {
+                "label": names[class_id],
+                "class_id": class_id,
+                "confidence": round(confidence, 4),
+                "bbox": {
+                    "x1": round(float(x1), 2),
+                    "y1": round(float(y1), 2),
+                    "x2": round(float(x2), 2),
+                    "y2": round(float(y2), 2),
+                },
+            }
+        )
 
     return detections
 
