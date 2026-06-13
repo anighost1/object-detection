@@ -26,8 +26,6 @@ type DetectionMarking = {
         y2: number;
     };
 
-    segments?: number[][];
-
     [key: string]: unknown;
 };
 
@@ -68,78 +66,6 @@ export default function Camera() {
     const [sending, setSending] =
         useState(false);
 
-    useEffect(() => {
-        const canvas = overlayCanvasRef.current;
-        if (canvas) {
-            const ctx = canvas.getContext('2d');
-            if (ctx) {
-                ctx.imageSmoothingEnabled = false;
-            }
-        }
-    }, []);
-
-    // ---------------------------------------------------
-    // POLYGON SIMPLIFICATION (Douglas-Peucker)
-    // ---------------------------------------------------
-
-    function pointLineDistance(
-        point: number[],
-        lineStart: number[],
-        lineEnd: number[]
-    ): number {
-        const dx = lineEnd[0] - lineStart[0];
-        const dy = lineEnd[1] - lineStart[1];
-        const t =
-            ((point[0] - lineStart[0]) * dx +
-                (point[1] - lineStart[1]) * dy) /
-            (dx * dx + dy * dy);
-        const projectionX = lineStart[0] + t * dx;
-        const projectionY = lineStart[1] + t * dy;
-        const dx2 = point[0] - projectionX;
-        const dy2 = point[1] - projectionY;
-        return Math.sqrt(dx2 * dx2 + dy2 * dy2);
-    }
-
-    function simplifyPolygon(
-        polygon: number[][],
-        epsilon: number = 1.5
-    ): number[][] {
-        if (polygon.length < 3) return polygon;
-
-        let dMax = 0;
-        let index = 0;
-
-        for (let i = 1; i < polygon.length - 1; i++) {
-            const d = pointLineDistance(
-                polygon[i],
-                polygon[0],
-                polygon[polygon.length - 1]
-            );
-            if (d > dMax) {
-                index = i;
-                dMax = d;
-            }
-        }
-
-        if (dMax > epsilon) {
-            const recResults1 = simplifyPolygon(
-                polygon.slice(0, index + 1),
-                epsilon
-            );
-            const recResults2 = simplifyPolygon(
-                polygon.slice(index),
-                epsilon
-            );
-
-            return [
-                ...recResults1.slice(0, -1),
-                ...recResults2
-            ];
-        } else {
-            return [polygon[0], polygon[polygon.length - 1]];
-        }
-    }
-
     // ---------------------------------------------------
     // SYNC OVERLAY SIZE
     // ---------------------------------------------------
@@ -149,39 +75,22 @@ export default function Camera() {
         overlayCanvas: HTMLCanvasElement
     ) {
         const width = video.videoWidth || 640;
+
         const height = video.videoHeight || 480;
 
         overlayCanvas.width = width;
         overlayCanvas.height = height;
-        overlayCanvas.style.width = `${video.clientWidth || width}px`;
-        overlayCanvas.style.height = `${video.clientHeight || height}px`;
+
+        overlayCanvas.style.width = `${video.clientWidth || width
+            }px`;
+
+        overlayCanvas.style.height = `${video.clientHeight || height
+            }px`;
     }
 
     // ---------------------------------------------------
     // DRAW DETECTIONS
     // ---------------------------------------------------
-
-    function drawSegmentOutline(
-        ctx: CanvasRenderingContext2D,
-        segments: number[][],
-        color: string
-    ) {
-        if (segments.length < 2) return;
-
-        const simplified = simplifyPolygon(segments);
-
-        ctx.strokeStyle = color;
-        ctx.lineWidth = 2;
-        ctx.beginPath();
-        ctx.moveTo(simplified[0][0], simplified[0][1]);
-
-        for (let i = 1; i < simplified.length; i++) {
-            ctx.lineTo(simplified[i][0], simplified[i][1]);
-        }
-
-        ctx.closePath();
-        ctx.stroke();
-    }
 
     function drawMarkings(payload: unknown) {
         const video = videoRef.current;
@@ -223,51 +132,81 @@ export default function Camera() {
         const detections =
             data.detections || [];
 
-        // Draw segment outlines (first pass - fast)
-        for (let i = 0; i < detections.length; i++) {
-            const detection = detections[i];
-            const segments = detection.segments;
+        detections.forEach(
+            (detection, index) => {
+                const bbox = detection.bbox;
 
-            if (Array.isArray(segments) && segments.length > 1) {
-                drawSegmentOutline(ctx, segments, getColor(i));
+                if (!bbox) {
+                    return;
+                }
+
+                if (
+                    !isNumber(bbox.x1) ||
+                    !isNumber(bbox.y1) ||
+                    !isNumber(bbox.x2) ||
+                    !isNumber(bbox.y2)
+                ) {
+                    return;
+                }
+
+                const x = bbox.x1;
+                const y = bbox.y1;
+
+                const width =
+                    bbox.x2 - bbox.x1;
+
+                const height =
+                    bbox.y2 - bbox.y1;
+
+                const color = getColor(index);
+
+                // BOX
+                ctx.strokeStyle = color;
+                ctx.lineWidth = 3;
+
+                ctx.strokeRect(
+                    x,
+                    y,
+                    width,
+                    height
+                );
+
+                // LABEL
+                const label =
+                    detection.label || 'object';
+
+                const confidence =
+                    detection.confidence || 0;
+
+                const text = `${label} ${Math.round(
+                    confidence * 100
+                )}%`;
+
+                ctx.font =
+                    '600 14px sans-serif';
+
+                const textWidth =
+                    ctx.measureText(text).width;
+
+                ctx.fillStyle =
+                    'rgba(0,0,0,0.7)';
+
+                ctx.fillRect(
+                    x,
+                    Math.max(y - 28, 0),
+                    textWidth + 14,
+                    24
+                );
+
+                ctx.fillStyle = '#ffffff';
+
+                ctx.fillText(
+                    text,
+                    x + 7,
+                    Math.max(y - 10, 14)
+                );
             }
-        }
-
-        // Draw labels (second pass)
-        ctx.font = '600 12px sans-serif';
-
-        for (let i = 0; i < detections.length; i++) {
-            const detection = detections[i];
-            const bbox = detection.bbox;
-
-            if (
-                !bbox ||
-                !isNumber(bbox.x1) ||
-                !isNumber(bbox.y1)
-            ) {
-                continue;
-            }
-
-            const label = detection.label || 'object';
-            const confidence = detection.confidence || 0;
-            const text = `${label} ${Math.round(confidence * 100)}%`;
-            const textWidth = ctx.measureText(text).width;
-
-            ctx.fillStyle = 'rgba(0,0,0,0.7)';
-            ctx.fillRect(
-                bbox.x1,
-                Math.max(bbox.y1 - 24, 0),
-                textWidth + 12,
-                22
-            );
-
-            ctx.fillStyle = '#ffffff';
-            ctx.fillText(
-                text,
-                bbox.x1 + 6,
-                Math.max(bbox.y1 - 8, 14)
-            );
-        }
+        );
     }
 
     // ---------------------------------------------------
