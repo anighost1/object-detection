@@ -3,7 +3,7 @@ import type { NextConfig } from "next";
 const nextConfig: NextConfig = {
   allowedDevOrigins: [
     "192.168.0.111",
-    "6956-49-37-66-148.ngrok-free.app",
+    "8515-223-185-61-130.ngrok-free.app",
   ],
 };
 
