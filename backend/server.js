@@ -10,7 +10,7 @@ const app = express();
 const server = http.createServer(app);
 
 const io = new Server(server, {
-  path: "/od/backend",
+  path: "/od/backend/socket.io",
   cors: {
     origin: "*",
   },
