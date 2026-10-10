@@ -9,8 +9,13 @@ const app = express();
 
 const server = http.createServer(app);
 
+// const io = new Server(server, {
+//   path: "/od/backend/socket.io",
+//   cors: {
+//     origin: "*",
+//   },
+// });
 const io = new Server(server, {
-  path: "/od/backend/socket.io",
   cors: {
     origin: "*",
   },
@@ -72,48 +77,81 @@ pythonWorker.stderr.on("data", (data) => {
 // PYTHON STDOUT
 // ---------------------------------------------------
 
-let pythonBuffer = "";
+// ---------------------------------------------------
+// LATEST-FRAME-WINS QUEUE
+// ---------------------------------------------------
 
+let pythonBuffer = "";
+let isProcessing = false;
+let activeJob = null;
+let pendingJob = null;
+
+function processNextFrame() {
+  if (isProcessing || !pendingJob) return;
+
+  activeJob = pendingJob;
+  pendingJob = null;
+  isProcessing = true;
+
+  const message = {
+    frameId: activeJob.frameId,
+    image: activeJob.image,
+    capturedAt: activeJob.capturedAt,
+  };
+
+  pythonWorker.stdin.write(
+    JSON.stringify(message) + "\n",
+    (err) => {
+      if (err) {
+        console.error("Python stdin error:", err);
+      }
+    }
+  );
+}
+
+// Replace the OLD stdout handler with this one.
 pythonWorker.stdout.on("data", (data) => {
   pythonBuffer += data.toString();
 
-  /*
-    Worker sends newline-delimited JSON
-  */
+  const lines = pythonBuffer.split("\n");
+  pythonBuffer = lines.pop();
 
-  const messages = pythonBuffer.split("\n");
+  for (const line of lines) {
+    if (!line.trim()) continue;
 
-  /*
-    Keep incomplete chunk
-  */
+    let result;
 
-  pythonBuffer = messages.pop();
-
-  for (const message of messages) {
-    if (!message.trim()) {
+    try {
+      result = JSON.parse(line);
+    } catch (err) {
+      console.error("Invalid Python JSON:", line);
       continue;
     }
 
-    try {
-      const parsed = JSON.parse(message);
-
-      /*
-        Broadcast result
-      */
-
-      io.emit(
-        "detection-result",
-        parsed
-      );
-    } catch (err) {
-      console.error(
-        "Failed to parse Python JSON"
-      );
-
-      console.error(err);
-
-      console.error(message);
+    // Match result to the job currently being processed.
+    if (!activeJob) {
+      console.warn("Received result without an active job");
+      continue;
     }
+
+    const completedJob = activeJob;
+    activeJob = null;
+    isProcessing = false;
+
+    if (completedJob.capturedAt != null) {
+      result.capturedAt = completedJob.capturedAt;
+    }
+
+    // Do not send results to disconnected clients.
+    if (io.sockets.sockets.has(completedJob.socketId)) {
+      io.to(completedJob.socketId).emit(
+        "detection-result",
+        result
+      );
+    }
+
+    // Process the most recent waiting frame.
+    processNextFrame();
   }
 });
 
@@ -141,73 +179,33 @@ io.on("connection", (socket) => {
   // RECEIVE FRAME
   // -----------------------------------------------
 
-  socket.on(
-    "detect-frame",
-    async (payload) => {
-      try {
-        /*
-          payload:
-          {
-            frameId: number,
-            image: base64
-          }
-        */
+  socket.on("detect-frame", (payload = {}) => {
+    const { frameId, image, capturedAt } = payload;
 
-        const {
-          frameId,
-          image,
-        } = payload;
-
-        if (!image) {
-          socket.emit(
-            "detection-error",
-            {
-              success: false,
-              error:
-                "No image provided",
-            }
-          );
-
-          return;
-        }
-
-        /*
-          Remove base64 prefix
-        */
-
-        const cleanBase64 =
-          image.replace(
-            /^data:image\/\w+;base64,/,
-            ""
-          );
-
-        /*
-          Send to Python worker
-        */
-
-        const message = {
-          frameId,
-          image: cleanBase64,
-        };
-
-        pythonWorker.stdin.write(
-          JSON.stringify(
-            message
-          ) + "\n"
-        );
-      } catch (err) {
-        console.error(err);
-
-        socket.emit(
-          "detection-error",
-          {
-            success: false,
-            error: err.message,
-          }
-        );
-      }
+    if (!image) {
+      socket.emit("detection-error", {
+        success: false,
+        error: "No image provided",
+        frameId,
+      });
+      return;
     }
-  );
+
+    const cleanBase64 = image.replace(
+      /^data:image\/\w+;base64,/,
+      ""
+    );
+
+    // Overwrite any older frame waiting for Python.
+    pendingJob = {
+      socketId: socket.id,
+      frameId,
+      capturedAt,
+      image: cleanBase64,
+    };
+
+    processNextFrame();
+  });
 
   // -----------------------------------------------
   // DISCONNECT

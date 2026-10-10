@@ -8,6 +8,8 @@ import cv2
 import numpy as np
 from PIL import Image
 from ultralytics import YOLO
+import torch
+import time
 
 # MODEL_PATH = "yolo.pt"
 MODEL_PATH = "../detectionservice/yolo.pt"
@@ -23,6 +25,18 @@ print("Loading YOLO model...", file=sys.stderr)
 model = YOLO(MODEL_PATH)
 
 print("YOLO model loaded.", file=sys.stderr)
+
+USE_CUDA = torch.cuda.is_available()
+
+print(f"CUDA available: {USE_CUDA}", file=sys.stderr)
+
+if USE_CUDA:
+    print(
+        f"GPU: {torch.cuda.get_device_name(0)}",
+        file=sys.stderr,
+    )
+else:
+    print("Using CPU for inference", file=sys.stderr)
 
 # ---------------------------------------------------
 # DETECTION
@@ -56,13 +70,26 @@ def mask_to_polygon(mask: np.ndarray) -> list[list[float]]:
 
 
 def run_model(image: Image.Image) -> list[dict[str, Any]]:
+    start = time.perf_counter()
+
     results = model.predict(
         image,
         verbose=False,
         conf=CONFIDENCE_THRESHOLD,
         iou=IOU_THRESHOLD,
+        imgsz=640,
+        device=0 if USE_CUDA else "cpu",
+        half=USE_CUDA,
     )
 
+    inference_ms = (time.perf_counter() - start) * 1000
+
+    print(
+        f"YOLO inference: {inference_ms:.1f} ms",
+        file=sys.stderr,
+    )
+
+    # Keep your existing result parsing and detection logic below.
     detections: list[dict[str, Any]] = []
 
     result = results[0]
@@ -86,10 +113,10 @@ def run_model(image: Image.Image) -> list[dict[str, Any]]:
             },
         }
 
-        # Add segmentation mask if available
         if has_masks and idx < len(result.masks.data):
             mask = result.masks.data[idx].cpu().numpy()
             polygon = mask_to_polygon(mask)
+
             if polygon:
                 detection_dict["segments"] = polygon
 
