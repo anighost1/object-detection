@@ -2,18 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { io, Socket } from 'socket.io-client';
-
-type Point = {
-    x: number;
-    y: number;
-};
-
-type BoundingBox = {
-    x: number;
-    y: number;
-    width: number;
-    height: number;
-};
+import Panorama360 from '@/components/Panorama360';
 
 type DetectionMarking = {
     label?: string;
@@ -295,8 +284,15 @@ export default function Camera() {
                         facingMode: {
                             ideal: "environment"
                         },
-                        width: 640,
-                        height: 480
+                        width: {
+                            ideal: 2880
+                        },
+                        height: {
+                            ideal: 1440
+                        },
+                        aspectRatio: {
+                            ideal: 2
+                        }
                     },
                     audio: false
                 });
@@ -305,7 +301,7 @@ export default function Camera() {
                 videoRef.current.srcObject =
                     stream;
             }
-        } catch (err: any) {
+        } catch (err: unknown) {
             console.error(err);
         }
     }
@@ -543,23 +539,32 @@ export default function Camera() {
                 </span>
             </div>
 
-            <div className="relative inline-block overflow-hidden rounded-lg border bg-black shadow-lg">
-                <video
-                    ref={videoRef}
-                    autoPlay
-                    playsInline
-                    muted
-                    width={640}
-                    height={480}
-                    className="block"
-                />
+            <div className="grid w-full max-w-6xl gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(320px,420px)]">
+                <div className="overflow-hidden rounded-lg border bg-black shadow-lg">
+                    <Panorama360
+                        videoRef={videoRef}
+                        overlayCanvasRef={overlayCanvasRef}
+                    />
+                </div>
 
-                <canvas
-                    ref={
-                        overlayCanvasRef
-                    }
-                    className="pointer-events-none absolute inset-0"
-                />
+                <div className="relative inline-block overflow-hidden rounded-lg border bg-black shadow-lg">
+                    <video
+                        ref={videoRef}
+                        autoPlay
+                        playsInline
+                        muted
+                        width={2880}
+                        height={1440}
+                        className="block h-auto w-full"
+                    />
+
+                    <canvas
+                        ref={
+                            overlayCanvasRef
+                        }
+                        className="pointer-events-none absolute inset-0"
+                    />
+                </div>
             </div>
 
             <canvas
