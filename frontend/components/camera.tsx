@@ -49,18 +49,16 @@ function getColor(index: number) {
 
 export default function Camera() {
     const videoRef = useRef<HTMLVideoElement | null>(null);
-
-    const captureCanvasRef =
-        useRef<HTMLCanvasElement | null>(null);
-
-    const overlayCanvasRef =
-        useRef<HTMLCanvasElement | null>(null);
-
+    const captureCanvasRef = useRef<HTMLCanvasElement | null>(null);
+    const overlayCanvasRef = useRef<HTMLCanvasElement | null>(null);
     const socketRef = useRef<Socket | null>(null);
+    const intervalRef = useRef<NodeJS.Timeout | null>(null);
 
-    const intervalRef = useRef<NodeJS.Timeout | null>(
-        null
-    );
+    const frameIdRef = useRef(0);
+    const lastRenderedFrameIdRef = useRef(-1);
+    const awaitingResultRef = useRef(false);
+
+    const MAX_RESULT_AGE_MS = 500;
 
     const [connected, setConnected] =
         useState(false);
@@ -151,10 +149,25 @@ export default function Camera() {
         const width = video.videoWidth || 640;
         const height = video.videoHeight || 480;
 
-        overlayCanvas.width = width;
-        overlayCanvas.height = height;
-        overlayCanvas.style.width = `${video.clientWidth || width}px`;
-        overlayCanvas.style.height = `${video.clientHeight || height}px`;
+        if (
+            overlayCanvas.width !== width ||
+            overlayCanvas.height !== height
+        ) {
+            overlayCanvas.width = width;
+            overlayCanvas.height = height;
+        }
+
+        if (
+            overlayCanvas.style.width !== `${video.clientWidth}px`
+        ) {
+            overlayCanvas.style.width = `${video.clientWidth}px`;
+        }
+
+        if (
+            overlayCanvas.style.height !== `${video.clientHeight}px`
+        ) {
+            overlayCanvas.style.height = `${video.clientHeight}px`;
+        }
     }
 
     // ---------------------------------------------------
@@ -328,12 +341,49 @@ export default function Camera() {
             setConnected(false);
         });
 
-        socket.on(
-            'detection-result',
-            (data) => {
-                drawMarkings(data);
+        socket.on('detection-result', (data) => {
+            // Release the next frame, even if this result is stale.
+            awaitingResultRef.current = false;
+
+            console.log('data',data);
+            
+
+            if (!data || data.success !== true) {
+                return;
             }
-        );
+
+            const frameId = data.frameId;
+
+            if (
+                typeof frameId === 'number' &&
+                frameId <= lastRenderedFrameIdRef.current
+            ) {
+                return;
+            }
+
+            // capturedAt must be echoed by the Node.js server.
+            if (typeof data.capturedAt === 'number') {
+                const ageMs = performance.now() - data.capturedAt;
+
+                if (ageMs > MAX_RESULT_AGE_MS) {
+                    console.debug(
+                        `Ignoring stale detection: ${ageMs.toFixed(0)} ms`
+                    );
+                    return;
+                }
+            }
+
+            if (typeof frameId === 'number') {
+                lastRenderedFrameIdRef.current = frameId;
+            }
+
+            drawMarkings(data);
+        });
+
+        socket.on('detection-error', (err) => {
+            awaitingResultRef.current = false;
+            console.error('Detection error:', err);
+        });
 
         socket.on(
             'detection-error',
@@ -377,74 +427,81 @@ export default function Camera() {
     // ---------------------------------------------------
 
     async function startStreaming() {
-        if (sending) {
+        if (sending || awaitingResultRef.current) {
             return;
         }
 
-        setSending(true);
-
-        const captureCanvas =
-            captureCanvasRef.current;
-
+        const captureCanvas = captureCanvasRef.current;
         const video = videoRef.current;
+        const socket = socketRef.current;
 
         if (
             !captureCanvas ||
-            !video
+            !video ||
+            !socket ||
+            !socket.connected
         ) {
-            setSending(false);
             return;
         }
 
-        const ctx =
-            captureCanvas.getContext('2d');
+        const ctx = captureCanvas.getContext('2d');
 
-        if (!ctx) {
-            setSending(false);
-            return;
-        }
+        if (!ctx) return;
 
-        let frameId = 0;
+        setSending(true);
 
-        intervalRef.current =
-            setInterval(() => {
-                if (
-                    video.videoWidth === 0 ||
-                    video.videoHeight === 0
-                ) {
-                    return;
-                }
+        // Start a fresh frame-ID sequence for this session.
+        frameIdRef.current = 0;
+        lastRenderedFrameIdRef.current = -1;
 
-                captureCanvas.width =
-                    video.videoWidth;
+        const captureAndSend = () => {
+            if (
+                !socket.connected ||
+                !video.videoWidth ||
+                !video.videoHeight ||
+                awaitingResultRef.current
+            ) {
+                return;
+            }
 
-                captureCanvas.height =
-                    video.videoHeight;
+            captureCanvas.width = video.videoWidth;
+            captureCanvas.height = video.videoHeight;
 
-                // DRAW VIDEO FRAME
-                ctx.drawImage(
-                    video,
-                    0,
-                    0
-                );
+            ctx.drawImage(
+                video,
+                0,
+                0,
+                captureCanvas.width,
+                captureCanvas.height
+            );
 
-                // COMPRESS FRAME
-                const dataUrl =
-                    captureCanvas.toDataURL(
-                        'image/jpeg',
-                        0.5
-                    );
+            // Timestamp immediately after capturing the image.
+            const capturedAt = performance.now();
+            const frameId = frameIdRef.current++;
 
-                // SEND TO NODE SERVER
-                socketRef.current?.emit(
-                    'detect-frame',
-                    {
-                        frameId:
-                            frameId++,
-                        image: dataUrl
-                    }
-                );
-            }, 200);
+            const image = captureCanvas.toDataURL(
+                'image/jpeg',
+                0.5
+            );
+
+            // Set before emit to prevent overlapping submissions.
+            awaitingResultRef.current = true;
+
+            socket.emit('detect-frame', {
+                frameId,
+                capturedAt,
+                image,
+            });
+        };
+
+        // Capture at most once per 100 ms, but skip while busy.
+        intervalRef.current = setInterval(
+            captureAndSend,
+            100
+        );
+
+        // Send the first frame immediately.
+        captureAndSend();
     }
 
     // ---------------------------------------------------
@@ -453,13 +510,11 @@ export default function Camera() {
 
     function stopStreaming() {
         if (intervalRef.current) {
-            clearInterval(
-                intervalRef.current
-            );
-
+            clearInterval(intervalRef.current);
             intervalRef.current = null;
         }
 
+        awaitingResultRef.current = false;
         setSending(false);
     }
 
