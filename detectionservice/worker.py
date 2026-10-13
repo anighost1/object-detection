@@ -1,201 +1,197 @@
-﻿import sys
+﻿import os
+import sys
 import json
 import base64
-import io
+import time
 from typing import Any
 
 import cv2
 import numpy as np
-from PIL import Image
-from ultralytics import YOLO
 import torch
-import time
+from ultralytics import YOLO
 
-# MODEL_PATH = "yolo.pt"
-MODEL_PATH = "../detectionservice/yolo.pt"
-CONFIDENCE_THRESHOLD = 0.25
-IOU_THRESHOLD = 0.45
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+MODEL_PATH = os.path.join(BASE_DIR, "yolo.pt")
 
-# ---------------------------------------------------
-# LOAD MODEL ONLY ONCE
-# ---------------------------------------------------
-
-print("Loading YOLO model...", file=sys.stderr)
-
-model = YOLO(MODEL_PATH)
-
-print("YOLO model loaded.", file=sys.stderr)
+CONFIDENCE_THRESHOLD = float(os.getenv("YOLO_CONF", "0.25"))
+IOU_THRESHOLD = float(os.getenv("YOLO_IOU", "0.45"))
+IMAGE_SIZE = int(os.getenv("YOLO_IMGSZ", "512"))
+MAX_DETECTIONS = int(os.getenv("YOLO_MAX_DET", "60"))
+RETURN_SEGMENTS = os.getenv("YOLO_SEGMENTS", "1") == "1"
+MAX_POLYGON_POINTS = int(os.getenv("YOLO_MAX_POLYGON_POINTS", "160"))
 
 USE_CUDA = torch.cuda.is_available()
+DEVICE = 0 if USE_CUDA else "cpu"
 
-print(f"CUDA available: {USE_CUDA}", file=sys.stderr)
+print("Loading YOLO model...", file=sys.stderr, flush=True)
+model = YOLO(MODEL_PATH)
 
-if USE_CUDA:
-    print(
-        f"GPU: {torch.cuda.get_device_name(0)}",
-        file=sys.stderr,
-    )
-else:
-    print("Using CPU for inference", file=sys.stderr)
-
-# ---------------------------------------------------
-# DETECTION
-# ---------------------------------------------------
+print(
+    f"YOLO ready | device={DEVICE} | imgsz={IMAGE_SIZE} "
+    f"| segments={RETURN_SEGMENTS}",
+    file=sys.stderr,
+    flush=True,
+)
 
 
-def mask_to_polygon(mask: np.ndarray) -> list[list[float]]:
-    """Convert a binary mask to polygon coordinates."""
-    mask_uint8 = (mask * 255).astype(np.uint8)
-    contours, _ = cv2.findContours(
-        mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-    )
+def decode_image(data: str) -> np.ndarray:
+    """Decode plain base64 or a data URL into a BGR image."""
+    if not isinstance(data, str) or not data:
+        raise ValueError("Missing image data")
 
-    if not contours:
-        return []
+    if data.startswith("data:") and "," in data:
+        data = data.split(",", 1)[1]
 
-    # Get the largest contour
-    largest_contour = max(contours, key=cv2.contourArea)
-    polygon = largest_contour.squeeze().tolist()
+    raw = base64.b64decode(data, validate=True)
+    encoded = np.frombuffer(raw, dtype=np.uint8)
+    image = cv2.imdecode(encoded, cv2.IMREAD_COLOR)
 
-    # Ensure polygon is a list of [x, y] pairs
-    if isinstance(polygon[0], (int, float)):
-        # Single point case
-        polygon = [polygon]
-    elif not isinstance(polygon[0], list):
-        polygon = [[float(p[0]), float(p[1])] for p in polygon]
-    else:
-        polygon = [[float(p[0]), float(p[1])] for p in polygon]
-
-    return polygon
-
-
-def run_model(image: Image.Image) -> list[dict[str, Any]]:
-    start = time.perf_counter()
-
-    results = model.predict(
-        image,
-        verbose=False,
-        conf=CONFIDENCE_THRESHOLD,
-        iou=IOU_THRESHOLD,
-        imgsz=640,
-        device=0 if USE_CUDA else "cpu",
-        half=USE_CUDA,
-    )
-
-    inference_ms = (time.perf_counter() - start) * 1000
-
-    print(
-        f"YOLO inference: {inference_ms:.1f} ms",
-        file=sys.stderr,
-    )
-
-    # Keep your existing result parsing and detection logic below.
-    detections: list[dict[str, Any]] = []
-
-    result = results[0]
-    names = model.names
-    has_masks = result.masks is not None
-
-    for idx, box in enumerate(result.boxes):
-        x1, y1, x2, y2 = box.xyxy[0].tolist()
-        class_id = int(box.cls[0])
-        confidence = float(box.conf[0])
-
-        detection_dict = {
-            "label": names[class_id],
-            "class_id": class_id,
-            "confidence": round(confidence, 4),
-            "bbox": {
-                "x1": round(float(x1), 2),
-                "y1": round(float(y1), 2),
-                "x2": round(float(x2), 2),
-                "y2": round(float(y2), 2),
-            },
-        }
-
-        if has_masks and idx < len(result.masks.data):
-            mask = result.masks.data[idx].cpu().numpy()
-            polygon = mask_to_polygon(mask)
-
-            if polygon:
-                detection_dict["segments"] = polygon
-
-        detections.append(detection_dict)
-
-    return detections
-
-
-# ---------------------------------------------------
-# BASE64 IMAGE DECODER
-# ---------------------------------------------------
-
-
-def decode_base64_image(base64_string: str) -> Image.Image:
-    image_bytes = base64.b64decode(base64_string)
-
-    image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    if image is None:
+        raise ValueError("Invalid or unsupported image")
 
     return image
 
 
-# ---------------------------------------------------
-# MAIN WORKER LOOP
-# ---------------------------------------------------
+def simplify_polygon(points: np.ndarray) -> list[list[float]]:
+    """Simplify an original-image pixel contour."""
+    points = np.asarray(points, dtype=np.float32)
 
-print("Python YOLO worker ready.", file=sys.stderr)
+    if points.ndim != 2 or points.shape[0] < 3 or points.shape[1] != 2:
+        return []
 
-while True:
+    contour = points.reshape(-1, 1, 2)
+    perimeter = cv2.arcLength(contour, True)
+    epsilon = max(1.0, perimeter * 0.003)
+    polygon = cv2.approxPolyDP(contour, epsilon, True)
+
+    while len(polygon) > MAX_POLYGON_POINTS and epsilon < max(2.0, perimeter * 0.05):
+        epsilon *= 1.5
+        polygon = cv2.approxPolyDP(contour, epsilon, True)
+
+    polygon = polygon.reshape(-1, 2)
+
+    if len(polygon) < 3:
+        return []
+
+    return [[round(float(x), 1), round(float(y), 1)] for x, y in polygon]
+
+
+def run_model(
+    image: np.ndarray,
+) -> tuple[list[dict[str, Any]], float]:
+    if USE_CUDA:
+        torch.cuda.synchronize()
+
+    start = time.perf_counter()
+
+    results = model.predict(
+        source=image,
+        verbose=False,
+        conf=CONFIDENCE_THRESHOLD,
+        iou=IOU_THRESHOLD,
+        imgsz=IMAGE_SIZE,
+        device=DEVICE,
+        half=USE_CUDA,
+        rect=True,
+        max_det=MAX_DETECTIONS,
+        augment=False,
+    )
+
+    if USE_CUDA:
+        torch.cuda.synchronize()
+
+    inference_ms = (time.perf_counter() - start) * 1000
+    result = results[0]
+    detections: list[dict[str, Any]] = []
+
+    if result.boxes is None or len(result.boxes) == 0:
+        return detections, inference_ms
+
+    # Transfer tensors in batches, not once per detection.
+    boxes = result.boxes.xyxy.cpu().numpy()
+    classes = result.boxes.cls.cpu().numpy().astype(np.int32)
+    scores = result.boxes.conf.cpu().numpy()
+    names = result.names
+
+    # Ultralytics scales these polygons to the original input image.
+    polygons = result.masks.xy if RETURN_SEGMENTS and result.masks is not None else None
+
+    for i, coords in enumerate(boxes):
+        x1, y1, x2, y2 = coords
+        class_id = int(classes[i])
+
+        item: dict[str, Any] = {
+            "label": names[class_id],
+            "class_id": class_id,
+            "confidence": round(float(scores[i]), 4),
+            "bbox": {
+                "x1": round(float(x1), 1),
+                "y1": round(float(y1), 1),
+                "x2": round(float(x2), 1),
+                "y2": round(float(y2), 1),
+            },
+        }
+
+        if polygons is not None and i < len(polygons):
+            polygon = simplify_polygon(polygons[i])
+            if polygon:
+                item["segments"] = polygon
+
+        detections.append(item)
+
+    return detections, inference_ms
+
+
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+
+    frame_id = None
+
     try:
-        # Read one line from stdin
-        line = sys.stdin.readline()
-
-        # EOF / closed pipe
-        if not line:
-            break
-
-        line = line.strip()
-
-        if not line:
-            continue
-
-        # Parse JSON payload
         payload = json.loads(line)
-
         frame_id = payload.get("frameId")
-        image_base64 = payload.get("image")
+        image_data = payload.get("image")
 
-        if not image_base64:
-            response = {
-                "success": False,
-                "error": "No image field provided",
-                "frameId": frame_id,
-            }
+        if not image_data:
+            raise ValueError("No image field provided")
 
-            print(json.dumps(response), flush=True)
-            continue
+        total_start = time.perf_counter()
 
-        # Decode image
-        image = decode_base64_image(image_base64)
+        decode_start = time.perf_counter()
+        image = decode_image(image_data)
+        decode_ms = (time.perf_counter() - decode_start) * 1000
 
-        # Run YOLO
-        detections = run_model(image)
+        height, width = image.shape[:2]
 
-        # Build response
+        detections, inference_ms = run_model(image)
+        processing_ms = (time.perf_counter() - total_start) * 1000
+
         response = {
             "success": True,
             "frameId": frame_id,
             "count": len(detections),
+            "imageWidth": width,
+            "imageHeight": height,
             "detections": detections,
+            "timing": {
+                "decodeMs": round(decode_ms, 2),
+                "inferenceMs": round(inference_ms, 2),
+                "processingMs": round(processing_ms, 2),
+            },
         }
 
-        # IMPORTANT:
-        # flush=True ensures Node receives output immediately
-        print(json.dumps(response), flush=True)
+        print(json.dumps(response, separators=(",", ":")), flush=True)
 
-    except Exception as e:
-        error_response = {
-            "success": False,
-            "error": str(e),
-        }
-
-        print(json.dumps(error_response), flush=True)
+    except Exception as exc:
+        print(
+            json.dumps(
+                {
+                    "success": False,
+                    "frameId": frame_id,
+                    "error": str(exc),
+                }
+            ),
+            flush=True,
+        )
